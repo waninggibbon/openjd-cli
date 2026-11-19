@@ -125,6 +125,7 @@ details on how Open Job Description's Jobs are run within Sessions.
 |`--tasks`|string, path|no| Instructs the command to run one or more tasks for the Step in a Session. The argument must be either the filename of a JSON or YAML file containing an array of maps from task parameter name to value; or an inlined JSON string of the same. Mutually exclusive with `--task-param/-tp` and `--maximum-tasks`. |`--tasks '[{"MyParam": 5}]'`, `--tasks file://parameter_set_file.json`|
 |`--maximum-tasks`|integer|no| A maximum number of Tasks to run from this Step. Unless present, the Session will run all Tasks defined in the Step's parameter space or the Task(s) selected by the `--task-param` or `--tasks` arguments. Mutually exclusive with `--task-param/-tp` and `--tasks`. |`--maximum-tasks 5`|
 |`--run-dependencies`|flag|no| If present, runs all of a Step's dependencies in the Session prior to the Step itself.                                                                                                                                                                                                |`--run-dependencies`|
+|`--approve-step`|string|no| Approves the approval gate of the Step with this name in advance (see [Step approvals](#step-approvals)), instead of asking at the terminal. Can be provided more than once. |`--approve-step ReviewPreview`|
 |`--path-mapping-rules`|string, path|no| The path mapping rules to apply to the template. Should be a JSON-formatted list of Open Job Description path mapping rules, provided as a string or a path to a JSON/YAML document prefixed with 'file://'.                                                                          |`--path-mapping-rules [{"source_os": "Windows", "source_path": "C:\test", "destination_path": "/mnt/test"}]`, `--path-mapping-rules file://rules_file.json`|
 |`--preserve`|flag|no| If present, the Session's working directory will not be deleted when the run is completed.           |`--preserve`|
 |`--verbose`|flag|no| If present, then verbose logging will be enabled in the Session's log. |`--verbose`|
@@ -148,6 +149,24 @@ Duration: 1.0 seconds
 Chunks run: 1
 
 ```
+
+#### Step approvals
+
+A Job Template that uses the `STEP_APPROVALS` extension
+([RFC 0200](https://github.com/OpenJobDescription/openjd-specifications/blob/mainline/rfcs/0200-step-approvals.md))
+can give a Step an `approval`: a person must approve the Step before any of its Tasks run. `openjd run` decides
+each approval itself, when the run reaches the Step (after the Steps before it, including its dependencies, have
+completed):
+
+* A Step named with `--approve-step` is approved in advance.
+* Otherwise, if stdin is an interactive terminal, the command shows the approval's message and links and asks
+  whether to approve the Step.
+* Otherwise the approval counts as rejected, so a non-interactive run never approves anything.
+
+When a Step is not approved, it and the Steps that depend on it do not run, the Steps that don't depend on it still
+run, and the command fails. A Step with an `approval` and no `script` (an approval-only Step) runs nothing, and
+completes successfully once approved. A template's `expiresAfterSeconds` is not applied to local runs.
+`openjd check`, `openjd summary` and `openjd run --help` show which Steps need approval.
 
 ### `schema`
 Returns the Open Job Description model as a JSON schema document body.
