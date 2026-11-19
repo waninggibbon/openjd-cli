@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import textwrap
 from typing import Callable, Optional
 
 from .._common import OpenJDCliResult
+from .._common._approvals import format_approval, is_approval_only, step_approval
 from openjd.model import Job, Step, StepParameterSpaceIterator
 
 
@@ -83,6 +85,38 @@ class DependencySummary:
 
 
 @dataclass
+class ApprovalLinkSummary:
+    """
+    Organizes the information of one resolved approval link in a dataclass.
+    """
+
+    label: str
+    # The link's full target: its url, or its PATH parameter's value with the subpath.
+    target: str
+
+
+@dataclass
+class ApprovalSummary:
+    """
+    Organizes a Step's resolved approval (STEP_APPROVALS) in a dataclass.
+    """
+
+    message: str
+    links: Optional[list[ApprovalLinkSummary]]
+    expires_after_seconds: Optional[int]
+    on_reject: str
+
+    def __str__(self) -> str:
+        lines = format_approval(
+            message=self.message,
+            links=[(link.label, link.target) for link in self.links or []],
+            expires_after_seconds=self.expires_after_seconds,
+        )
+        lines.append(f"On reject: {self.on_reject}")
+        return "".join(f"{line}\n" for line in lines)
+
+
+@dataclass
 class StepSummary:
     """
     Organizes Step information in a dataclass.
@@ -94,9 +128,17 @@ class StepSummary:
     total_tasks: int
     environments: Optional[list[EnvironmentSummary]]
     dependencies: Optional[list[DependencySummary]]
+    approval: Optional[ApprovalSummary] = None
+    approval_only: bool = False
 
     def __str__(self) -> str:
-        summary_str = f"'{self.name}' ({self.total_tasks} total Tasks)\n"
+        if self.approval_only:
+            summary_str = f"'{self.name}' (approval-only, no Tasks)\n"
+        else:
+            summary_str = f"'{self.name}' ({self.total_tasks} total Tasks)\n"
+
+        if self.approval:
+            summary_str += "  Needs approval:\n" + textwrap.indent(str(self.approval), "    ")
 
         if self.parameter_definitions:
             summary_str += (
@@ -171,6 +213,8 @@ class OpenJDStepSummaryResult(OpenJDCliResult):
     total_environments: int
     environments: Optional[list[EnvironmentSummary]]
     dependencies: Optional[list[DependencySummary]]
+    approval: Optional[ApprovalSummary] = None
+    approval_only: bool = False
 
     def __str__(self) -> str:
         summary_str = f"""
@@ -180,6 +224,10 @@ Total tasks: {self.total_tasks}
 Total task parameters: {self.total_parameters}
 Total environments: {self.total_environments}
 """
+
+        if self.approval:
+            kind = " (approval-only Step: it runs nothing)" if self.approval_only else ""
+            summary_str += f"\nNeeds approval{kind}:\n" + textwrap.indent(str(self.approval), "  ")
 
         if self.dependencies:
             summary_str += f"\nDependencies ({len(self.dependencies)}):\n{_format_summary_list(self.dependencies)}"
@@ -231,6 +279,26 @@ def _get_step_summary(step: Step) -> StepSummary:
             step.dependencies, lambda dep: DependencySummary(step_name=dep.dependsOn)
         )
 
+    approval: Optional[ApprovalSummary] = None
+    resolved_approval = step_approval(step)
+    if resolved_approval is not None:
+        approval = ApprovalSummary(
+            message=resolved_approval.message,
+            links=[
+                ApprovalLinkSummary(label=link.label, target=link.target)
+                for link in resolved_approval.links or []
+            ]
+            or None,
+            expires_after_seconds=resolved_approval.expiresAfterSeconds,
+            # None means the default, FAIL (Template Schemas §3.7).
+            on_reject=(resolved_approval.onReject.value if resolved_approval.onReject else "FAIL"),
+        )
+    approval_only = is_approval_only(step)
+    if approval_only:
+        # An approval-only Step has no parameterSpace, but it has no Task either:
+        # it runs nothing.
+        total_tasks = 0
+
     return StepSummary(
         name=step.name,
         description=step.description,
@@ -238,6 +306,8 @@ def _get_step_summary(step: Step) -> StepSummary:
         total_tasks=total_tasks,
         environments=environments,
         dependencies=dependencies,
+        approval=approval,
+        approval_only=approval_only,
     )
 
 
@@ -299,6 +369,8 @@ def output_summary_result(job: Job, step_name: str | None = None) -> OpenJDCliRe
                 total_environments=len(step.environments) if step.environments else 0,
                 environments=step.environments,
                 dependencies=step.dependencies,
+                approval=step.approval,
+                approval_only=step.approval_only,
             )
 
     return OpenJDCliResult(

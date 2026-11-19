@@ -603,6 +603,180 @@ class TestRunSelectedStep:
         assert "needs approval" not in outerr.out
 
 
+class TestSummary:
+    def test_job_summary(self, capsys) -> None:
+        # WHEN
+        outerr = run_openjd_cli_main(
+            capsys, args=["summary", APPROVALS_JOB, "-p", "ShotName=sh020"], expected_exit_code=0
+        )
+
+        # THEN
+        out = outerr.out
+        # The approval-only Step has no Task.
+        assert "Total steps: 5\nTotal tasks: 4\n" in out
+        preview = str(TEMPLATES_DIR / "out" / "preview")
+        assert (
+            "2. 'ReviewPreview' (approval-only, no Tasks)\n"
+            "  Needs approval:\n"
+            "    Message:\n"
+            "      Check the preview frames of sh020\n"
+            "      before the final render runs.\n"
+            "    Links:\n"
+            f"      - Preview frames: {preview}\n"
+            "      - Shot tracker: https://tracker.example.com/shots/sh020\n"
+            "    Expires after: 3600 seconds\n"
+            "    On reject: FAIL\n"
+            "  1 dependencies\n"
+        ) in out
+        assert "3. 'Final' (1 total Tasks)\n  1 dependencies\n" in out
+
+    def test_job_summary_of_approval_with_script(self, capsys) -> None:
+        # WHEN
+        outerr = run_openjd_cli_main(
+            capsys, args=["summary", APPROVAL_WITH_SCRIPT_JOB], expected_exit_code=0
+        )
+
+        # THEN
+        assert (
+            "1. 'UseLicensedAsset' (2 total Tasks)\n"
+            "  Needs approval:\n"
+            "    Message:\n"
+            "      Confirm that the license for tree.usd covers UseLicensedAsset in LicensedJob.\n"
+            "    On reject: FAIL\n"
+            "  Task parameters:\n"
+        ) in outerr.out
+
+    def test_step_summary(self, capsys) -> None:
+        # WHEN
+        outerr = run_openjd_cli_main(
+            capsys,
+            args=["summary", APPROVALS_JOB, "--step", "ReviewPreview"],
+            expected_exit_code=0,
+        )
+
+        # THEN
+        assert (
+            "Total tasks: 0\n"
+            "Total task parameters: 0\n"
+            "Total environments: 0\n"
+            "\n"
+            "Needs approval (approval-only Step: it runs nothing):\n"
+            "  Message:\n"
+            "    Check the preview frames of sh010\n"
+        ) in outerr.out
+        assert "  On reject: FAIL\n\nDependencies (1):\n- 'Preview'\n" in outerr.out
+
+    def test_json_summary(self, capsys) -> None:
+        # WHEN
+        outerr = run_openjd_cli_main(
+            capsys, args=["summary", APPROVALS_JOB, "--output", "json"], expected_exit_code=0
+        )
+
+        # THEN
+        steps = {step["name"]: step for step in json.loads(outerr.out)["steps"]}
+        assert steps["ReviewPreview"]["approval_only"] is True
+        assert "total_tasks" not in steps["ReviewPreview"]  # 0 is omitted
+        assert steps["ReviewPreview"]["approval"] == {
+            "message": "Check the preview frames of sh010\nbefore the final render runs.\n",
+            "links": [
+                {"label": "Preview frames", "target": str(TEMPLATES_DIR / "out" / "preview")},
+                {"label": "Shot tracker", "target": "https://tracker.example.com/shots/sh010"},
+            ],
+            "expires_after_seconds": 3600,
+            "on_reject": "FAIL",
+        }
+        assert "approval" not in steps["Final"]
+        assert "approval_only" not in steps["Final"]
+
+    def test_yaml_step_summary(self, capsys) -> None:
+        # WHEN
+        outerr = run_openjd_cli_main(
+            capsys,
+            args=[
+                "summary",
+                APPROVAL_WITH_SCRIPT_JOB,
+                "--step",
+                "UseLicensedAsset",
+                "-p",
+                "AssetName=rock.usd",
+                "--output",
+                "yaml",
+            ],
+            expected_exit_code=0,
+        )
+
+        # THEN
+        result = yaml.safe_load(outerr.out)
+        assert result["approval"] == {
+            "message": "Confirm that the license for rock.usd covers UseLicensedAsset in LicensedJob.",
+            "on_reject": "FAIL",
+        }
+        assert "approval_only" not in result
+
+
+class TestCheck:
+    def test_check_lists_the_steps_that_need_approval(self, capsys) -> None:
+        # WHEN
+        outerr = run_openjd_cli_main(capsys, args=["check", APPROVALS_JOB], expected_exit_code=0)
+
+        # THEN
+        assert outerr.out == (
+            f"Template at '{APPROVALS_JOB}' passes validation checks.\n"
+            "Steps that need approval before they run:\n"
+            "  - 'ReviewPreview' (approval-only)\n"
+        )
+
+    def test_check_approval_with_script(self, capsys) -> None:
+        # WHEN
+        outerr = run_openjd_cli_main(
+            capsys, args=["check", APPROVAL_WITH_SCRIPT_JOB], expected_exit_code=0
+        )
+
+        # THEN
+        assert outerr.out.endswith(
+            "Steps that need approval before they run:\n  - 'UseLicensedAsset'\n"
+        )
+
+    def test_check_without_approvals_is_unchanged(self, capsys) -> None:
+        # WHEN
+        template = str(TEMPLATES_DIR / "basic.yaml")
+        outerr = run_openjd_cli_main(capsys, args=["check", template], expected_exit_code=0)
+
+        # THEN
+        assert outerr.out == f"Template at '{template}' passes validation checks.\n"
+
+    def test_check_rejects_the_extension_when_not_accepted(self, capsys) -> None:
+        # WHEN
+        outerr = run_openjd_cli_main(
+            capsys, args=["check", APPROVALS_JOB, "--extensions", "EXPR"], expected_exit_code=1
+        )
+
+        # THEN
+        assert "Unsupported extension names: STEP_APPROVALS" in outerr.out
+
+    def test_check_rejects_an_invalid_approval(self, capsys, tmp_path: Path) -> None:
+        # GIVEN
+        template = {
+            "specificationVersion": "jobtemplate-2023-09",
+            "extensions": ["STEP_APPROVALS"],
+            "name": "Job",
+            "steps": [
+                {
+                    "name": "Gate",
+                    "approval": {"message": "OK?", "links": [{"label": "x", "url": "ftp://x"}]},
+                }
+            ],
+        }
+
+        # WHEN
+        outerr = run_openjd_cli_main(
+            capsys, args=["check", _write_template(tmp_path, template)], expected_exit_code=1
+        )
+
+        # THEN
+        assert "url must be an absolute URI whose scheme is http or https" in outerr.out
+
+
 class TestRunHelp:
     def test_help_lists_the_steps_that_need_approval(self, capsys, tmp_path: Path) -> None:
         # GIVEN
