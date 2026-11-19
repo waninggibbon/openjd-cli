@@ -1,0 +1,23 @@
+specificationVersion: jobtemplate-2023-09
+extensions:
+- STEP_APPROVALS
+- EXPR
+name: LicensedJob
+parameterDefinitions:
+- name: AssetName
+  type: STRING
+  default: tree.usd
+steps:
+- name: UseLicensedAsset
+  approval:
+    message: "Confirm that the license for {{Param.AssetName}} covers {{Step.Name}} in {{Job.Name}}."
+  parameterSpace:
+    taskParameterDefinitions:
+    - name: Frame
+      type: INT
+      range: "1-2"
+  script:
+    actions:
+      onRun:
+        command: python
+        args: ["-c", "print('Processing frame {{Task.Param.Frame}}')"]

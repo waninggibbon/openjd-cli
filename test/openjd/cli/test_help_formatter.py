@@ -198,6 +198,7 @@ class TestGenerateJobTemplateHelp:
 
         # Create a minimal mock template with only name
         template = Mock()
+        template.steps = []
         template.name = "minimal-job"
         template.description = None
         template.parameterDefinitions = None
@@ -227,6 +228,7 @@ class TestGenerateJobTemplateHelp:
 
         # Create a mock template with name and description
         template = Mock()
+        template.steps = []
         template.name = "described-job"
         template.description = "This is a sample job that demonstrates basic functionality."
         template.parameterDefinitions = None
@@ -256,6 +258,7 @@ class TestGenerateJobTemplateHelp:
 
         # Create a mock template with name, description, but no parameters
         template = Mock()
+        template.steps = []
         template.name = "no-params-job"
         template.description = "A job without parameters"
         template.parameterDefinitions = []  # Empty list
@@ -410,6 +413,7 @@ class TestGenerateJobTemplateHelp:
         from openjd.cli._run._help_formatter import generate_job_template_help
 
         template = Mock()
+        template.steps = []
         template.name = "test-job-name"
         template.description = "This is the test job description."
         template.parameterDefinitions = None
@@ -508,6 +512,7 @@ class TestGenerateJobTemplateHelp:
 
         # Create a simple template
         template = Mock()
+        template.steps = []
         template.name = "simple-job"
         template.description = "A simple job"
         template.parameterDefinitions = None
@@ -590,6 +595,7 @@ class TestGenerateJobTemplateHelp:
 
         # Create a template without parameters
         template = Mock()
+        template.steps = []
         template.name = "no-params-job"
         template.description = "Job without parameters"
         template.parameterDefinitions = None

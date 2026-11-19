@@ -7,6 +7,8 @@ from openjd.model import Step, TaskParameterSet
 from openjd.model.v2023_09 import Environment
 from openjd.sessions import Session
 
+from ._approval_gate import ApprovalDecision, StepApprovalGate
+
 if TYPE_CHECKING:
     # Annotations only: `openjd.expr` is a facade over the native extension and
     # importing the CLI must not load it. These tables are produced by
@@ -66,6 +68,10 @@ class RunTaskAction(SessionAction):
         self._resolved_symtab = resolved_symtab
 
     def run(self):
+        if self._step.script is None:
+            # An approval-only Step (STEP_APPROVALS) has no script and no Tasks to
+            # run; LocalSession.run_step never makes this action for one.
+            raise RuntimeError(f"Step '{self._step.name}' has no script to run.")
         self._session.run_task(
             step_script=self._step.script,
             task_parameter_values=self._parameters,
@@ -78,6 +84,36 @@ class RunTaskAction(SessionAction):
     def __str__(self):
         parameters = {name: parameter.value for name, parameter in self._parameters.items()}
         return f"Run Step '{self._step.name}' with Task parameters '{str(parameters)}'"
+
+
+class ApproveStepAction(SessionAction):
+    """Decides a Step's approval gate (STEP_APPROVALS, RFC 0200).
+
+    Nothing runs in the Session: the CLI decides the gate itself, possibly by asking
+    at the terminal. It is an action so that an interrupted prompt is reported like
+    any other interrupted action.
+    """
+
+    _step_name: str
+    _request: list[str]
+    _gate: StepApprovalGate
+    decision: Optional[ApprovalDecision]
+
+    def __init__(
+        self, session: Session, step_name: str, request: list[str], gate: StepApprovalGate
+    ):
+        super(ApproveStepAction, self).__init__(session)
+        self._step_name = step_name
+        self._request = request
+        self._gate = gate
+        self.decision = None
+
+    def run(self):
+        # Raises: KeyboardInterrupt if the prompt is interrupted.
+        self.decision = self._gate.decide(self._step_name, self._request)
+
+    def __str__(self):
+        return f"Approve Step '{self._step_name}'"
 
 
 class EnterEnvironmentAction(SessionAction):

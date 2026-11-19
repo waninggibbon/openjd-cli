@@ -11,14 +11,22 @@ from datetime import datetime, timedelta, timezone
 from math import isfinite
 
 from ._actions import (
+    ApproveStepAction,
     EnterEnvironmentAction,
     ExitEnvironmentAction,
     RunTaskAction,
     SessionAction,
     EnvironmentType,
 )
+from ._approval_gate import ApprovalDecision, StepApprovalGate
 from ._logs import LocalSessionLogHandler, LogEntry, LoggingTimestampFormat
 from ..._common import SUPPORTED_EXTENSIONS
+from ..._common._approvals import (
+    format_step_approval,
+    is_approval_only,
+    step_approval,
+    terminal_safe,
+)
 
 from openjd.model import (
     IntRangeExpr,
@@ -126,6 +134,10 @@ class LocalSession:
     _entered_env_symtabs: dict[str, "SerializedSymbolTable"]
     _log_handler: LocalSessionLogHandler
     _cleanup_called: bool
+    _approval_gate: StepApprovalGate
+    approval_decisions: dict[str, ApprovalDecision]
+    steps_blocked: list[str]
+    _steps_not_completed: set[str]
 
     def __init__(
         self,
@@ -142,6 +154,7 @@ class LocalSession:
         revision_extensions: RevisionExtensions = RevisionExtensions(
             spec_rev=SpecificationRevision.v2023_09, supported_extensions=SUPPORTED_EXTENSIONS
         ),
+        approval_gate: Optional[StepApprovalGate] = None,
     ):
         self.session_id = session_id
         self._action_ended = Event()
@@ -185,6 +198,19 @@ class LocalSession:
         self._failed_action = None
         self._environments_entered = []
 
+        # STEP_APPROVALS (RFC 0200): decides each approval gate that run_step
+        # reaches. Without one, a gate is asked at the terminal, or rejected when
+        # there is none.
+        self._approval_gate = approval_gate if approval_gate is not None else StepApprovalGate()
+        # The decision of each gate reached, in the order reached.
+        self.approval_decisions = {}
+        # Steps not run because a Step they depend on did not complete successfully.
+        self.steps_blocked = []
+        # The Steps not approved, and steps_blocked: the Steps of this session that
+        # did not fully complete successfully, so their dependents must not run.
+        # A task failure ends the session instead, so it never adds to this.
+        self._steps_not_completed = set()
+
         # Initialize the action queue
         self._enter_env_queue: Queue[EnterEnvironmentAction] = Queue()
         self._action_queue: Queue[RunTaskAction] = Queue()
@@ -206,6 +232,13 @@ class LocalSession:
             if self.failed:
                 LOG.info(
                     msg=f"Open Job Description CLI: ERROR executing action: '{self.failed_action}' (see Task logs for details)",
+                    extra={"session_id": self.session_id},
+                )
+            elif self._steps_not_completed:
+                not_run = self.steps_not_approved + self.steps_blocked
+                LOG.info(
+                    msg="Open Job Description CLI: Not all Steps were approved. Steps that did not run: "
+                    + ", ".join(f"'{terminal_safe(name)}'" for name in not_run),
                     extra={"session_id": self.session_id},
                 )
             else:
@@ -263,8 +296,15 @@ class LocalSession:
 
     def _sigint_handler(self, signum: int, frame: Optional[FrameType]) -> None:
         """Signal handler that is invoked when the process receives a SIGINT/SIGTERM"""
+        awaiting_approval = isinstance(self._current_action, ApproveStepAction)
+        if awaiting_approval:
+            self._approval_gate.end_prompt_line()
         LOG.info("Interruption signal recieved.")
         self.cancel()
+        if awaiting_approval:
+            # Nothing runs in the Session while an approval prompt waits, so there
+            # is no action whose end would stop the run. Interrupt the prompt.
+            raise KeyboardInterrupt
 
     def run_environment_enters(
         self,
@@ -471,6 +511,35 @@ class LocalSession:
                 f"Session must be in READY state, but is in {self._openjd_session.state.name}"
             )
 
+        # STEP_APPROVALS (RFC 0200): a Step whose dependency was not approved, or
+        # was itself not run for that reason, does not run; and a Step with an
+        # approval runs only once approved. In both cases the Steps that are
+        # independent of it still run, as they would in a render farm.
+        blocked_by = [
+            dep.dependsOn
+            for dep in step.dependencies or []
+            if dep.dependsOn in self._steps_not_completed
+        ]
+        if blocked_by:
+            LOG.info(
+                msg=f"Open Job Description CLI: Not running step '{terminal_safe(step.name)}': it depends on "
+                + ", ".join(f"'{terminal_safe(name)}'" for name in blocked_by)
+                + ", which did not complete successfully",
+                extra={"session_id": self.session_id},
+            )
+            self.steps_blocked.append(step.name)
+            self._steps_not_completed.add(step.name)
+            return
+        if step_approval(step) is not None and not self._run_approval_gate(step):
+            self._steps_not_completed.add(step.name)
+            return
+        if is_approval_only(step):
+            LOG.info(
+                msg=f"Open Job Description CLI: Step '{terminal_safe(step.name)}' is approval-only and has nothing to run; it completed successfully",
+                extra={"session_id": self.session_id},
+            )
+            return
+
         LOG.info(
             msg=f"Open Job Description CLI: Running step '{step.name}'",
             extra={"session_id": self.session_id},
@@ -513,6 +582,75 @@ class LocalSession:
         finally:
             # Exit all the step environments
             self.run_environment_exits(type=EnvironmentType.STEP, keep_session_running=True)
+
+    def _run_approval_gate(self, step: Step) -> bool:
+        """Decides the approval gate of a Step that has an approval, and returns
+        whether the Step was approved.
+
+        The gate is reached once the Steps before it in the run have completed (in
+        particular its dependencies, when they are part of the run), and before any
+        of its Step Environments are entered or Tasks run.
+
+        Raises:
+            LocalSessionFailed: If the approval prompt was interrupted.
+        """
+        approval = step_approval(step)
+        assert approval is not None
+        name = terminal_safe(step.name)
+        if is_approval_only(step):
+            header = f"Step '{name}' is approval-only. Approving it lets the Steps that depend on it run."
+        else:
+            header = f"Step '{name}' needs approval before its Tasks run."
+        # RFC 0200 gives a local run no expiry: a prompt waits as long as the
+        # person running the CLI does.
+        details = format_step_approval(
+            approval, indent="  ", expiry_note=" (not applied by openjd run)"
+        )
+        LOG.info(msg=f"Open Job Description CLI: {header}", extra={"session_id": self.session_id})
+        for line in details:
+            LOG.info(msg=line, extra={"session_id": self.session_id})
+
+        action = ApproveStepAction(
+            session=self._openjd_session,
+            step_name=step.name,
+            request=[header] + details,
+            gate=self._approval_gate,
+        )
+        try:
+            self._current_action = action
+            action.run()
+        except KeyboardInterrupt:
+            # The prompt was interrupted. Through _sigint_handler the run is already
+            # cancelled; any other interrupt stops the run here in the same way.
+            LOG.info(
+                msg=f"Open Job Description CLI: The approval prompt for Step '{name}' was interrupted",
+                extra={"session_id": self.session_id},
+            )
+            self.failed = True
+            self._failed_action = action
+            raise LocalSessionFailed(action)
+        finally:
+            self._current_action = None
+        decision = action.decision
+        assert decision is not None
+        self.approval_decisions[step.name] = decision
+
+        if decision.approved:
+            LOG.info(
+                msg=f"Open Job Description CLI: Step '{name}' {decision.description}",
+                extra={"session_id": self.session_id},
+            )
+        else:
+            LOG.info(
+                msg=f"Open Job Description CLI: Step '{name}' {decision.description}. It and the Steps that depend on it will not run",
+                extra={"session_id": self.session_id},
+            )
+        return decision.approved
+
+    @property
+    def steps_not_approved(self) -> list[str]:
+        """The Steps whose approval gate was reached and not approved."""
+        return [name for name, decision in self.approval_decisions.items() if not decision.approved]
 
     def cleanup(self) -> None:
         if not self._cleanup_called:

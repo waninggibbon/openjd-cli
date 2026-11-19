@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 
 from openjd.model import DecodeValidationError, JobTemplate
 from .._common import read_job_template, process_extensions_argument
+from .._common._approvals import is_approval_only, step_approval, terminal_safe
 
 
 def format_parameter_info(param_def: Dict[str, Any]) -> str:
@@ -215,6 +216,16 @@ def generate_job_template_help(
             # Indent the parameter info with 2 spaces
             lines.append(textwrap.indent(param_info, "  "))
 
+        lines.append("")
+
+    # STEP_APPROVALS (RFC 0200): name the Steps that `openjd run` stops at to ask
+    # for approval, since each is a value that --approve-step accepts.
+    approval_steps = [step for step in template.steps if step_approval(step) is not None]
+    if approval_steps:
+        lines.append("Steps That Need Approval (--approve-step STEP_NAME):")
+        for step in approval_steps:
+            kind = " (approval-only)" if is_approval_only(step) else ""
+            lines.append(f"  {terminal_safe(step.name)}{kind}")
         lines.append("")
 
     # Add standard options section

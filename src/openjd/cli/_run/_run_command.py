@@ -7,14 +7,17 @@ import json
 from typing import TYPE_CHECKING, Iterable, Optional
 import re
 import logging
+import shlex
 import time
 
+from ._local_session._approval_gate import ApprovalDecision, StepApprovalGate
 from ._local_session._session_manager import (
     LocalSession,
     LocalSessionFailed,
     LogEntry,
     LoggingTimestampFormat,
 )
+from .._common._approvals import step_approval, terminal_safe
 from .._common import (
     add_extensions_argument,
     OpenJDCliResult,
@@ -46,6 +49,20 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class StepApprovalResult:
+    """
+    How the approval gate of a Step (STEP_APPROVALS) was decided in a local run.
+    """
+
+    step_name: str
+    # An ApprovalDecision value. A plain string so that it serializes as YAML too.
+    decision: str
+
+    def __str__(self) -> str:
+        return f"'{terminal_safe(self.step_name)}': {ApprovalDecision(self.decision).description}"
+
+
+@dataclass
 class OpenJDRunResult(OpenJDCliResult):
     """
     Holds information and Task logs from a local Session.
@@ -56,11 +73,20 @@ class OpenJDRunResult(OpenJDCliResult):
     duration: float
     chunks_run: int
     logs: list[LogEntry]
+    # The approval gates reached, in order (STEP_APPROVALS).
+    approvals: Optional[list[StepApprovalResult]] = None
+    # Steps not run because a Step they depend on was not approved.
+    steps_blocked: Optional[list[str]] = None
 
     def __str__(self) -> str:
         step_message = ""
         if self.step_name is not None:
             step_message = f"Step: {self.step_name}\n"
+        approvals_message = ""
+        if self.approvals:
+            approvals_message = "Approvals:\n" + "".join(
+                f"  - {approval}\n" for approval in self.approvals
+            )
         return f"""
 --- Results of local session ---
 
@@ -69,7 +95,7 @@ class OpenJDRunResult(OpenJDCliResult):
 Job: {self.job_name}
 {step_message}Duration: {self.duration} seconds
 Chunks run: {self.chunks_run}
-"""
+{approvals_message}"""
 
 
 def add_run_arguments(run_parser: ArgumentParser):
@@ -155,7 +181,63 @@ def add_run_arguments(run_parser: ArgumentParser):
         default="relative",
         help="How to format the log output timestamps when running the job.",
     )
+    run_parser.add_argument(
+        "--approve-step",
+        dest="approve_steps",
+        action="append",
+        metavar="STEP_NAME",
+        help=(
+            "Approve the approval gate (STEP_APPROVALS) of the Step with this name in advance, instead of being "
+            "asked at the terminal when the run reaches it. Can be provided more than once. Without an interactive "
+            "terminal, a gate that is not approved in advance counts as rejected: that Step and the Steps that depend "
+            "on it do not run, and the command fails."
+        ),
+    )
     add_extensions_argument(run_parser)
+
+
+def _validate_approve_steps(step_map: dict[str, Step], approve_steps: list[str]) -> None:
+    """
+    Checks that every Step named with --approve-step exists and has an approval.
+
+    Raises:
+        RuntimeError if any does not
+    """
+    error_list: list[str] = []
+    for name in approve_steps:
+        step = step_map.get(name)
+        if step is None:
+            error_list.append(f"No Step with name '{name}' is defined in the given Job Template.")
+        elif step_approval(step) is None:
+            error_list.append(f"Step '{name}' does not have an approval.")
+    if error_list:
+        raise RuntimeError(
+            "Errors in --approve-step:" + "".join(f"\n - {error}" for error in error_list)
+        )
+
+
+def _not_approved_message(session: LocalSession) -> str:
+    """
+    Explains which approval gates of a run were not approved, and what did not run.
+    """
+    lines: list[str] = []
+    for name in session.steps_not_approved:
+        decision = session.approval_decisions[name]
+        safe_name = terminal_safe(name)
+        if decision == ApprovalDecision.NO_TERMINAL:
+            lines.append(
+                f"Step '{safe_name}' was not approved: it needs approval, and there is no interactive terminal "
+                f"to ask at. Use --approve-step {terminal_safe(shlex.quote(name))} to approve it in advance."
+            )
+        else:
+            lines.append(f"Step '{safe_name}' was {decision.description}, so it did not run.")
+    if session.steps_blocked:
+        lines.append(
+            "Steps that did not run because they depend on a Step that was not approved: "
+            + ", ".join(f"'{terminal_safe(name)}'" for name in session.steps_blocked)
+            + "."
+        )
+    return "\n".join(lines)
 
 
 def _collect_dependency_steps(step_map: dict[str, Step], step: Step) -> list[Step]:
@@ -338,6 +420,7 @@ def _run_local_session(
     revision_extensions: RevisionExtensions = RevisionExtensions(
         spec_rev=SpecificationRevision.v2023_09, supported_extensions=[]
     ),
+    approval_gate: Optional[StepApprovalGate] = None,
 ) -> OpenJDCliResult:
     """
     Creates a Session object and listens for log messages to synchronously end the session.
@@ -361,6 +444,7 @@ def _run_local_session(
             should_print_logs=should_print_logs,
             retain_working_dir=retain_working_dir,
             revision_extensions=revision_extensions,
+            approval_gate=approval_gate,
         ) as session:
             for dep_step in step_list:
                 step_name = dep_step.name
@@ -402,6 +486,25 @@ def _run_local_session(
             logs=[] if session is None else session.get_log_messages(),
         )
 
+    approvals = [
+        StepApprovalResult(step_name=name, decision=decision.value)
+        for name, decision in session.approval_decisions.items()
+    ]
+    if session.steps_not_approved:
+        # STEP_APPROVALS (RFC 0200): a rejected gate means that Step did not fully
+        # complete successfully, so the run did not either.
+        return OpenJDRunResult(
+            status="error",
+            message=_not_approved_message(session) + preserved_message,
+            job_name=job.name,
+            step_name=selected_step.name if selected_step else None,
+            duration=duration,
+            chunks_run=session.task_run_count,
+            logs=session.get_log_messages(),
+            approvals=approvals,
+            steps_blocked=session.steps_blocked or None,
+        )
+
     return OpenJDRunResult(
         status="success",
         message="Session ended successfully" + preserved_message,
@@ -410,6 +513,7 @@ def _run_local_session(
         duration=duration,
         chunks_run=session.task_run_count,
         logs=session.get_log_messages(),
+        approvals=approvals or None,
     )
 
 
@@ -478,6 +582,9 @@ def do_run(args: Namespace) -> OpenJDCliResult:
 
         # Map Step names to Step objects so they can be easily accessed
         step_map = {step.name: step for step in the_job.steps}
+
+        # Raises: RuntimeError
+        _validate_approve_steps(step_map, args.approve_steps or [])
 
         if args.step is not None:
             # If a step name was provided
@@ -591,4 +698,9 @@ def do_run(args: Namespace) -> OpenJDCliResult:
         should_print_logs=(args.output == "human-readable"),
         retain_working_dir=args.preserve,
         revision_extensions=revision_extensions,
+        approval_gate=StepApprovalGate(
+            approved_in_advance=args.approve_steps or [],
+            # Keep stdout parseable when it carries JSON or YAML output.
+            prompt_to_stderr=(args.output != "human-readable"),
+        ),
     )

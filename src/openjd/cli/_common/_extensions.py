@@ -7,12 +7,17 @@ from typing import Optional
 # EXPR (RFCs 0005/0006) and WRAP_ACTIONS (RFC 0008) are added so the CLI can run
 # templates that declare them. WRAP_ACTIONS implies EXPR; the model library
 # handles that implication when it parses the template.
+# STEP_APPROVALS (RFC 0200): `openjd run` enforces each Step's approval gate by
+# asking at the terminal or through --approve-step (see _run/_local_session).
+# The model intersects this list with the extensions it implements, so with an
+# openjd-model that lacks STEP_APPROVALS such templates are still rejected.
 SUPPORTED_EXTENSIONS = [
     "TASK_CHUNKING",
     "REDACTED_ENV_VARS",
     "FEATURE_BUNDLE_1",
     "EXPR",
     "WRAP_ACTIONS",
+    "STEP_APPROVALS",
 ]
 
 

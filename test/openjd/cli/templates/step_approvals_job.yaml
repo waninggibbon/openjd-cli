@@ -1,0 +1,56 @@
+specificationVersion: jobtemplate-2023-09
+extensions:
+- STEP_APPROVALS
+name: ApprovalsJob
+parameterDefinitions:
+- name: ShotName
+  type: STRING
+  default: sh010
+- name: OutputDir
+  type: PATH
+  objectType: DIRECTORY
+  dataFlow: OUT
+  default: out
+steps:
+- name: Preview
+  script:
+    actions:
+      onRun:
+        command: python
+        args: ["-c", "print('Preview ran')"]
+- name: ReviewPreview
+  dependencies:
+  - dependsOn: Preview
+  approval:
+    message: |
+      Check the preview frames of {{Param.ShotName}}
+      before the final render runs.
+    links:
+    - label: Preview frames
+      parameter: OutputDir
+      subpath: preview
+    - label: Shot tracker
+      url: "https://tracker.example.com/shots/{{Param.ShotName}}"
+    expiresAfterSeconds: 3600
+- name: Final
+  dependencies:
+  - dependsOn: ReviewPreview
+  script:
+    actions:
+      onRun:
+        command: python
+        args: ["-c", "print('Final ran')"]
+- name: Publish
+  dependencies:
+  - dependsOn: Final
+  script:
+    actions:
+      onRun:
+        command: python
+        args: ["-c", "print('Publish ran')"]
+- name: Independent
+  script:
+    actions:
+      onRun:
+        command: python
+        args: ["-c", "print('Independent ran')"]

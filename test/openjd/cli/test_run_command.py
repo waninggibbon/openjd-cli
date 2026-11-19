@@ -285,6 +285,7 @@ def test_preserve_option(
         verbose=False,
         preserve=True,
         extensions="",
+        approve_steps=None,
     )
 
     # WHEN
@@ -344,6 +345,7 @@ def test_verbose_option(
         verbose=True,
         preserve=False,
         extensions="",
+        approve_steps=None,
     )
 
     # WHEN
@@ -373,6 +375,7 @@ def test_do_run_error():
         verbose=False,
         preserve=False,
         extensions="",
+        approve_steps=None,
     )
     with pytest.raises(SystemExit):
         do_run(mock_args)
@@ -439,6 +442,7 @@ def test_do_run_path_mapping_rules(caplog: pytest.LogCaptureFixture):
                 verbose=False,
                 preserve=False,
                 extensions="",
+                approve_steps=None,
             )
 
         # WHEN
@@ -483,6 +487,7 @@ def test_do_run_nonexistent_step(capsys: pytest.CaptureFixture, tmp_path: Path):
         verbose=False,
         preserve=False,
         extensions="",
+        approve_steps=None,
     )
     with pytest.raises(SystemExit):
         do_run(mock_args)
